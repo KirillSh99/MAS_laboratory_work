@@ -7,4 +7,5 @@ class Scene:
         self.entities = defaultdict(list)
 
     def get_entities_by_type(self, entity_type) -> typing.List:
-        return self.entities[entity_type]
+        all_entities = self.entities.get(entity_type, [])
+        return [entity for entity in all_entities if not entity.is_deleting]

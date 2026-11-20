@@ -131,7 +131,23 @@ class CourierEntity(BaseEntity):
                 or item.start_time <= start_time < item.end_time
                 or item.start_time < end_time <= item.end_time
             ):
-                if item.rec_type != "Ожидание":
+                if item.rec_type not in ("Ожидание", "WAIT"):
                     result.append(item)
 
         return result
+
+    def get_all_order_records(self, order) -> typing.List[ScheduleItem]:
+        return [item for item in self.schedule if item.order == order]
+
+    def get_schedule_json(self) -> list:
+        return [
+            {
+                "Курьер": self.name,
+                "Заказ": item.order.name if item.order else "",
+                "Тип операции": item.rec_type,
+                "Начало": round(item.start_time, 2),
+                "Конец": round(item.end_time, 2),
+                "Стоимость": round(item.cost, 2),
+            }
+            for item in self.schedule
+        ]

@@ -2,7 +2,7 @@ from typing import Dict, Callable, Any
 import logging
 import traceback
 
-from thespian.actors import Actor, ActorAddress
+from thespian.actors import Actor, ActorAddress, ActorExitRequest
 from agents.message import MessageType, Message
 
 
@@ -26,6 +26,10 @@ class AgentBase(Actor):
             del self.handlers[msg_type]
 
     def receiveMessage(self, msg, sender):
+        if isinstance(msg, ActorExitRequest):
+            self.handle_delete_message()
+            return
+
         logging.debug("%s получил сообщение: %s", self.name, msg)
         if isinstance(msg, Message):
             handler = self.handlers.get(msg.msg_type)
@@ -45,6 +49,11 @@ class AgentBase(Actor):
         self.entity = data.get("entity")
         self.name = f"Агент {self.entity.name}"
         logging.info("%s проинициализирован", self.name)
+
+    def handle_delete_message(self):
+        if hasattr(self, "entity") and self.entity is not None:
+            self.entity.is_deleting = True
+            logging.info("%s удаляется из системы", self.name)
 
     @staticmethod
     def get_decreasing_kpi_value(value: float, min_value: float, max_value: float):

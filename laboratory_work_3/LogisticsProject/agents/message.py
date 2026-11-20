@@ -13,6 +13,16 @@ class MessageType(Enum):
     PRICE_RESPONSE = "Ответ цены"
     PLANNING_REQUEST = "Запрос на размещение"
     PLANNING_RESPONSE = "Ответ на размещение"
+    REMOVE_ORDER = "Удаление из расписания"
+    DISPLACEMENT_REQUEST = "Запрос на вытеснение"
+    DISPLACEMENT_RESPONSE = "Ответ на вытеснение"
+    NEW_COURIER = "Новый курьер"
+    DELETED_COURIER = "Удаление курьера"
+    DELETED_ORDER = "Удаление заказа"
+    FREED_SLOT = "Освобождение слота"
+    REPLAN_ORDER = "Перепланирование заказа"
+    UPDATE_ORDER_PARAMS = "Изменение параметров заказа"
+    UPDATE_COURIER_PARAMS = "Изменение параметров курьера"
 
 
 @dataclass

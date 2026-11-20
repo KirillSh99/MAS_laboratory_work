@@ -12,12 +12,64 @@ class OrderAgent(AgentBase):
         self.name = "Агент заказа"
         self.possible_variants = []
         self.unchecked_couriers = []
+        self.displaced_count = 0
+
+        self.current_courier = None
+        self.current_evaluating_variant = None
+        self.pending_consents = []
+        self.consent_replies = []
 
         self.subscribe(MessageType.PRICE_RESPONSE, self.handle_price_response)
         self.subscribe(MessageType.PLANNING_RESPONSE, self.handle_planning_response)
+        self.subscribe(MessageType.REMOVE_ORDER, self.handle_remove_message)
+        self.subscribe(
+            MessageType.DISPLACEMENT_REQUEST, self.handle_displacement_request
+        )
+        self.subscribe(
+            MessageType.DISPLACEMENT_RESPONSE, self.handle_displacement_response
+        )
+        self.subscribe(MessageType.NEW_COURIER, self.handle_new_resource_message)
+        self.subscribe(MessageType.DELETED_COURIER, self.handle_delete_courier_message)
+        self.subscribe(MessageType.FREED_SLOT, self.handle_freed_slot_message)
+        self.subscribe(MessageType.REPLAN_ORDER, self.handle_replan_message)
+        self.subscribe(
+            MessageType.UPDATE_ORDER_PARAMS, self.handle_update_params_message
+        )
 
     def handle_init_message(self, message, sender):
         super().handle_init_message(message, sender)
+        self.__send_params_request()
+
+    def handle_remove_message(self, message, sender, is_displacement: bool = True):
+        courier = message.msg_body
+        if is_displacement:
+            self.displaced_count += 1
+            logging.info(
+                "%s — удален из расписания курьера %s. Вытеснен раз: %d",
+                self.name,
+                courier.name,
+                self.displaced_count,
+            )
+            if self.displaced_count > 3:
+                logging.warning(
+                    "%s: превышен лимит вытеснений! Заказ снимается с планирования.",
+                    self.name,
+                )
+                self.current_courier = None
+                self.entity.delivery_data = {}
+                return
+        else:
+            logging.info(
+                "%s — курьер %s выбыл, запускаю перепланирование",
+                self.name,
+                courier.name,
+            )
+
+        self.current_courier = None
+        self.entity.delivery_data = {}
+        self.current_evaluating_variant = None
+        self.possible_variants.clear()
+        self.unchecked_couriers.clear()
         self.__send_params_request()
 
     def __send_params_request(self):
@@ -93,17 +145,85 @@ class OrderAgent(AgentBase):
 
         logging.info(f"{self} - {sorted_vars=}")
         best_variant = sorted_vars[0]
+
+        if best_variant.get("variant_name") == "conflict_multi":
+            orders_to_remove = best_variant.get("orders_to_remove", [])
+            if orders_to_remove:
+                self.pending_consents = []
+                self.consent_replies = []
+                self.current_evaluating_variant = best_variant
+
+                for ord_ent in orders_to_remove:
+                    addr = self.dispatcher.reference_book.get_address(ord_ent)
+                    if addr:
+                        self.pending_consents.append(addr)
+                        self.send(
+                            addr, Message(MessageType.DISPLACEMENT_REQUEST, self.entity)
+                        )
+
+                if self.pending_consents:
+                    logging.info(
+                        f"{self.name} запрашивает согласие на вытеснение у {len(self.pending_consents)} заказов."
+                    )
+                    return
+
+        self._send_planning_request(best_variant)
+
+    def _send_planning_request(self, variant):
         best_variant_address = self.dispatcher.reference_book.get_address(
-            best_variant.get("courier")
+            variant.get("courier")
         )
+        self.current_evaluating_variant = variant
 
         logging.info(
-            f"{self} - лучшим вариантом признан {best_variant}, "
-            f"адрес - {best_variant_address}"
+            f"{self.name} - лучшим признан {variant.get('variant_name')}, запрос курьеру {variant.get('courier').name}"
         )
-
-        request_message = Message(MessageType.PLANNING_REQUEST, best_variant)
+        request_message = Message(MessageType.PLANNING_REQUEST, variant)
         self.send(best_variant_address, request_message)
+
+    def handle_displacement_request(self, message, sender):
+        displacing_order = message.msg_body
+
+        alternatives = []
+        if self.current_courier:
+            alternatives = [
+                v
+                for v in self.possible_variants
+                if v["courier"].number != self.current_courier.number
+            ]
+
+        if alternatives:
+            logging.info(
+                f"{self.name} СОГЛАСЕН уступить место заказу {displacing_order.name} (есть {len(alternatives)} альт. вариантов)."
+            )
+            self.send(sender, Message(MessageType.DISPLACEMENT_RESPONSE, True))
+        else:
+            logging.info(
+                f"{self.name} ОТКАЗЫВАЕТ уступить место заказу {displacing_order.name} (нет запасных вариантов)."
+            )
+            self.send(sender, Message(MessageType.DISPLACEMENT_RESPONSE, False))
+
+    def handle_displacement_response(self, message, sender):
+        consent_given = message.msg_body
+        if not self.current_evaluating_variant:
+            return
+
+        self.consent_replies.append(consent_given)
+
+        if len(self.consent_replies) == len(self.pending_consents):
+            if all(self.consent_replies):
+                logging.info(
+                    f"{self.name} получил согласие ВСЕХ заказов. Отправляем план курьеру!"
+                )
+                self._send_planning_request(self.current_evaluating_variant)
+            else:
+                logging.info(
+                    f"{self.name} получил ОТКАЗ на вытеснение. Ищу другой вариант."
+                )
+                if self.current_evaluating_variant in self.possible_variants:
+                    self.possible_variants.remove(self.current_evaluating_variant)
+                self.current_evaluating_variant = None
+                self.__run_planning()
 
     def __evaluate_variants(self):
         if not self.possible_variants:
@@ -122,7 +242,7 @@ class OrderAgent(AgentBase):
             start_efficiency = self.get_decreasing_kpi_value(
                 variant.get("time_from"), min_start_time, max_start_time
             )
-            finish_efficiency = self.get_increasing_kpi_value(
+            finish_efficiency = self.get_decreasing_kpi_value(
                 variant.get("time_to"), min_finish_time, max_finish_time
             )
             price_efficiency = self.get_decreasing_kpi_value(
@@ -151,6 +271,95 @@ class OrderAgent(AgentBase):
     def handle_planning_response(self, message, sender):
         success = message.msg_body
         if success:
-            logging.info("Заказ успешно запланирован")
+            logging.info("%s успешно запланирован", self.name)
+            if self.current_evaluating_variant:
+                self.current_courier = self.current_evaluating_variant["courier"]
+                self.entity.delivery_data = self.current_evaluating_variant
         else:
-            logging.warning("Отказал, вариант невыполним")
+            logging.warning(
+                "%s: Отказ от курьера. Пробуем следующий вариант.", self.name
+            )
+            if self.current_evaluating_variant in self.possible_variants:
+                self.possible_variants.remove(self.current_evaluating_variant)
+            self.current_evaluating_variant = None
+            self.__run_planning()
+
+    def handle_new_resource_message(self, message, sender):
+        courier = message.msg_body
+        logging.info("%s — узнал о новом курьере %s", self.name, courier.name)
+        if not self.entity.delivery_data.get("courier"):
+            self.displaced_count = 0
+            self.possible_variants.clear()
+            self.unchecked_couriers.clear()
+            self.__send_params_request()
+
+    def handle_delete_courier_message(self, message, sender):
+        courier = message.msg_body
+        if self.entity.delivery_data.get("courier") != courier:
+            return
+        self.handle_remove_message(message, sender, is_displacement=False)
+
+    def handle_delete_message(self):
+        super().handle_delete_message()
+        courier = self.entity.delivery_data.get("courier")
+        if courier:
+            courier_address = self.dispatcher.reference_book.get_address(courier)
+            if courier_address:
+                payload = {"order": self.entity, "reason": "deleted"}
+                self.send(courier_address, Message(MessageType.DELETED_ORDER, payload))
+        self.current_courier = None
+        self.entity.delivery_data = {}
+
+    def handle_freed_slot_message(self, message, sender):
+        courier = message.msg_body
+        logging.info(
+            "%s — узнал об освобождении времени у курьера %s", self.name, courier.name
+        )
+        if not self.entity.delivery_data.get("courier") and not self.unchecked_couriers:
+            self.displaced_count = 0
+            self.possible_variants.clear()
+            self.__send_params_request()
+
+    def handle_replan_message(self, message, sender):
+        courier = message.msg_body
+        logging.info(
+            "%s — требуется перепланирование после изменений у курьера %s",
+            self.name,
+            courier.name,
+        )
+        self.current_courier = None
+        self.entity.delivery_data = {}
+        self.current_evaluating_variant = None
+        self.possible_variants.clear()
+        self.unchecked_couriers.clear()
+        self.__send_params_request()
+
+    def handle_update_params_message(self, message, sender):
+        data = message.msg_body
+        old_window = (self.entity.time_from, self.entity.time_to)
+        self.entity.time_from = float(data["time_from"])
+        self.entity.time_to = float(data["time_to"])
+
+        logging.info(
+            "%s — окно изменено [%.2f; %.2f] → [%.2f; %.2f]",
+            self.name,
+            old_window[0],
+            old_window[1],
+            self.entity.time_from,
+            self.entity.time_to,
+        )
+
+        old_courier = self.entity.delivery_data.get("courier")
+        if old_courier:
+            courier_address = self.dispatcher.reference_book.get_address(old_courier)
+            if courier_address:
+                payload = {"order": self.entity, "reason": "replan"}
+                self.send(courier_address, Message(MessageType.DELETED_ORDER, payload))
+
+        self.current_courier = None
+        self.entity.delivery_data = {}
+        self.current_evaluating_variant = None
+        self.displaced_count = 0
+        self.possible_variants.clear()
+        self.unchecked_couriers.clear()
+        self.__send_params_request()
