@@ -1,0 +1,62 @@
+version: '3.8'
+
+services:
+  # База данных PostgreSQL
+  db:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: agent_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Кэш Redis
+  redis:
+    image: redis:7-alpine
+    container_name: redis_cache
+    restart: always
+    ports:
+      - "6379:6379"
+
+  # бэкенд с FastAPI и Акторами
+  backend:
+    build: .
+    container_name: ai_backend
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+      - redis
+      - ollama
+    environment:
+      DATABASE_URL: "postgresql://user:pass@db:5432/agent_db"
+      REDIS_HOST: "redis"
+      OLLAMA_HOST: "http://ollama:11434"
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+  # текущий сервис Ollama
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    entrypoint: >
+      sh -c "
+      ollama serve &
+      echo '⏳ Ждем запуск Ollama...' &&
+      sleep 10 &&
+      ollama pull tinyllama &&
+      echo '✅ Ollama готов' &&
+      wait
+      "
+
+volumes:
+  ollama_data:
+  postgres_data:

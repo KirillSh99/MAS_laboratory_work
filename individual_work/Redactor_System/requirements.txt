@@ -1,0 +1,9 @@
+PyQt5
+thespian
+requests
+pydantic
+SQLAlchemy
+psycopg2-binary
+redis
+fastapi
+uvicorn
